@@ -81,6 +81,11 @@
               <span>Importar</span>
               <input type="file" id="import-input" accept=".json" class="d-none">
             </label>
+            <button id="clear-btn" class="btn btn-outline-danger d-flex align-items-center">
+              <i class="fas fa-trash-alt me-2"></i>
+              <span>Limpiar Todo</span>
+            </button>
+
           </div>
         </div>
         <p class="text-secondary mt-2">Keep track of your favorite manga chapters in one place</p>
@@ -290,6 +295,15 @@
           };
           reader.readAsText(file);
         });
+
+        document.getElementById('clear-btn').addEventListener('click', () => {
+          const confirmClear = confirm('¿Estás seguro de que querés borrar toda la lista de mangas? Esta acción no se puede deshacer.');
+          if (!confirmClear) return;
+
+          localStorage.removeItem(STORAGE_KEY);
+          loadMangaList();
+        });
+
 
       }
 
