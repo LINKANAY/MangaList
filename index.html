@@ -142,12 +142,13 @@
       </div>
 
 
-      <div class="form-check mb-3">
-        <input class="form-check-input" type="checkbox" value="" id="filter-unread">
+      <div class="form-check mt-3">
+        <input class="form-check-input" type="checkbox" id="filter-unread" onchange="loadMangaList()">
         <label class="form-check-label" for="filter-unread">
-          Mostrar solo mangas con capítulos sin leer
+          Mostrar solo mangas con capítulos por leer
         </label>
       </div>
+
 
       <!-- Error Alert (hidden by default) -->
       <div id="error-alert" class="alert alert-danger alert-dismissible fade show d-none mb-4" role="alert">
@@ -196,17 +197,6 @@
       const errorMessage = document.getElementById('error-message');
       const closeError = document.getElementById('close-error');
 
-      // Reader modal elements
-      const readerModal = document.getElementById('reader-modal');
-      const readerTitle = document.getElementById('reader-title');
-      const readerChapter = document.getElementById('reader-chapter');
-      const readerContent = document.getElementById('reader-content');
-      const closeReader = document.getElementById('close-reader');
-      const prevChapter = document.getElementById('prev-chapter');
-      const nextChapter = document.getElementById('next-chapter');
-      const prevChapterBottom = document.getElementById('prev-chapter-bottom');
-      const nextChapterBottom = document.getElementById('next-chapter-bottom');
-
       // LocalStorage key for saving manga data
       const STORAGE_KEY = 'manga-tracker-data';
 
@@ -221,15 +211,8 @@
         urlForm.addEventListener('submit', handleAddManga);
         refreshAllBtn.addEventListener('click', handleRefreshAll);
         closeError.addEventListener('click', hideError);
-        closeReader.addEventListener('click', closeReaderModal);
         document.getElementById('filter-unread').addEventListener('change', loadMangaList);
 
-
-        // Setup modal navigation events
-        prevChapter.addEventListener('click', navigateToPrevChapter);
-        nextChapter.addEventListener('click', navigateToNextChapter);
-        prevChapterBottom.addEventListener('click', navigateToPrevChapter);
-        nextChapterBottom.addEventListener('click', navigateToNextChapter);
 
         document.getElementById('export-btn').addEventListener('click', () => {
           const data = localStorage.getItem(STORAGE_KEY);
@@ -285,8 +268,13 @@
 
         // Aplicar filtro si está activo
         if (onlyUnread) {
-          mangaData = mangaData.filter(manga => manga.latestChapter > manga.lastReadChapter);
+          mangaData = mangaData.filter(manga =>
+            manga.latestChapter != null &&
+            manga.lastReadChapter != null &&
+            parseFloat(manga.latestChapter) > parseFloat(manga.lastReadChapter)
+          );
         }
+
 
         // Orden alfabético por título
         mangaData.sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }));
@@ -455,9 +443,11 @@
             try {
               const updatedManga = await fetchMangaInfo(manga.url);
               updatedMangaData.push({
-                ...manga,
-                latestChapter: updatedManga.latestChapter
-              });
+  ...manga,
+  latestChapter: updatedManga.latestChapter ?? manga.latestChapter, // usar el nuevo si viene, o el anterior
+  lastReadChapter: manga.lastReadChapter ?? 0 // mantener lectura anterior
+});
+
             } catch (error) {
               updatedMangaData.push(manga);
             }
@@ -475,24 +465,30 @@
           // Save all updated data
           localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedMangaData));
 
-          // Refresh UI
-          loadMangaList();
+          
 
           // Finalizar barra
           bar.classList.remove('progress-bar-animated', 'progress-bar-striped');
           bar.classList.add('bg-success');
           bar.textContent = '¡Listo!';
+
+          // Refresh UI
+          loadMangaList();
+
         } catch (error) {
           showError('Failed to refresh some manga');
         } finally {
-          // Hide loading state
-          refreshAllBtn.disabled = false;
-          loader.classList.add('d-none');
 
           // Ocultar la barra después de un tiempo (opcional)
           setTimeout(() => {
             progressContainer.classList.add('d-none');
           }, 2000); // Oculta después de 2 segundos
+
+          // Hide loading state
+          refreshAllBtn.disabled = false;
+          loader.classList.add('d-none');
+
+          
         }
       }
 
@@ -571,111 +567,6 @@
           loadMangaList();
         } else {
           alert('Ya estás en el capítulo más reciente.');
-        }
-      }
-
-      function openReader(manga) {
-        // Set modal title and chapter info
-        readerTitle.textContent = manga.title;
-        readerChapter.textContent = `Chapter ${manga.lastReadChapter}`;
-
-        // In a real app, we would fetch the actual chapter content
-        // Here we're displaying placeholder content
-        readerContent.innerHTML = `
-          <div class="text-center py-8">
-            <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-700 mx-auto mb-4"></div>
-            <p class="text-slate-600">Loading chapter content...</p>
-          </div>
-        `;
-
-        // Show the modal
-        readerModal.classList.remove('hidden');
-        document.body.style.overflow = 'hidden';
-
-        // Simulate loading chapter content
-        setTimeout(() => {
-          loadChapterContent(manga.url, manga.lastReadChapter);
-        }, 800);
-
-        // Set up navigation button states
-        updateNavigationButtons(manga);
-      }
-
-      function closeReaderModal() {
-        readerModal.classList.add('hidden');
-        document.body.style.overflow = '';
-      }
-
-      function updateNavigationButtons(manga) {
-        // Disable previous button if we're at chapter 1
-        if (manga.lastReadChapter <= 1) {
-          prevChapter.disabled = true;
-          prevChapterBottom.disabled = true;
-          prevChapter.classList.add('opacity-50', 'cursor-not-allowed');
-          prevChapterBottom.classList.add('opacity-50', 'cursor-not-allowed');
-        } else {
-          prevChapter.disabled = false;
-          prevChapterBottom.disabled = false;
-          prevChapter.classList.remove('opacity-50', 'cursor-not-allowed');
-          prevChapterBottom.classList.remove('opacity-50', 'cursor-not-allowed');
-        }
-
-        // Disable next button if we're at the latest chapter
-        if (manga.lastReadChapter >= manga.latestChapter) {
-          nextChapter.disabled = true;
-          nextChapterBottom.disabled = true;
-          nextChapter.classList.add('opacity-50', 'cursor-not-allowed');
-          nextChapterBottom.classList.add('opacity-50', 'cursor-not-allowed');
-        } else {
-          nextChapter.disabled = false;
-          nextChapterBottom.disabled = false;
-          nextChapter.classList.remove('opacity-50', 'cursor-not-allowed');
-          nextChapterBottom.classList.remove('opacity-50', 'cursor-not-allowed');
-        }
-      }
-
-      function navigateToPrevChapter() {
-        // This would be implemented in the real app
-        // For now, show a message
-        alert('Previous chapter functionality will be implemented with the API integration');
-      }
-
-      function navigateToNextChapter() {
-        // This would be implemented in the real app
-        // For now, show a message
-        alert('Next chapter functionality will be implemented with the API integration');
-      }
-
-      async function loadChapterContent(url, chapterNum) {
-        try {
-          // In a real app, we would fetch the actual chapter content
-          // Here we're displaying placeholder content
-          readerContent.innerHTML = `
-            <div class="chapter-content max-w-2xl mx-auto">
-              <p class="text-lg">This is a prototype of the manga reader. In the final version, the actual chapter content from the website would be displayed here.</p>
-              <div class="my-8 p-6 bg-blue-50 rounded-lg">
-                <h3 class="font-bold text-xl mb-2">Chapter ${chapterNum} Content</h3>
-                <p>The scraping functionality will extract the chapter content from URLs like:</p>
-                <code class="block bg-slate-100 p-3 my-3 rounded text-sm overflow-x-auto">
-                  ${url}
-                </code>
-                <p>When implemented with the backend API, this will show:</p>
-                <ul class="list-disc pl-5 space-y-2 mt-2">
-                  <li>All chapter text and images</li>
-                  <li>Properly formatted layout</li>
-                  <li>Navigation between chapters</li>
-                </ul>
-              </div>
-              <p>The reader will automatically update your "last read" chapter when you navigate to new chapters.</p>
-            </div>
-          `;
-        } catch (error) {
-          readerContent.innerHTML = `
-            <div class="p-4 bg-red-50 text-red-700 rounded-lg">
-              <i class="fas fa-exclamation-circle mr-2"></i>
-              Failed to load chapter content. Please try again.
-            </div>
-          `;
         }
       }
 
