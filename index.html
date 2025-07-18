@@ -133,6 +133,15 @@
 
       </div>
 
+      <!-- Contenedor oculto por defecto -->
+      <div id="refreshProgressContainer" class="d-none mt-3">
+        <div class="progress" style="height: 25px;">
+          <div id="refreshBar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar"
+            style="width: 0%;">0%</div>
+        </div>
+      </div>
+
+
       <div class="form-check mb-3">
         <input class="form-check-input" type="checkbox" value="" id="filter-unread">
         <label class="form-check-label" for="filter-unread">
@@ -171,47 +180,6 @@
       <!-- Manga List -->
       <div id="manga-list" class="row row-cols-1 row-cols-sm-2 row-cols-lg-3 d-none" style="overflow-x: hidden;">
         <!-- Manga entries will be dynamically added here -->
-      </div>
-    </div>
-  </div>
-
-  <!-- Reader Modal (Hidden by default) -->
-  <div class="modal fade" id="reader-modal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-xl modal-dialog-scrollable">
-      <div class="modal-content">
-        <!-- Modal Header -->
-        <div class="modal-header">
-          <div>
-            <h5 id="reader-title" class="modal-title fw-bold">Manga Title</h5>
-            <p id="reader-chapter" class="text-secondary mb-0 small">Chapter X</p>
-          </div>
-          <div class="ms-auto d-flex align-items-center me-2">
-            <button id="prev-chapter" class="btn btn-outline-secondary btn-sm me-2">
-              <i class="fas fa-chevron-left me-1"></i> Previous
-            </button>
-            <button id="next-chapter" class="btn btn-primary btn-sm">
-              Next <i class="fas fa-chevron-right ms-1"></i>
-            </button>
-          </div>
-          <button type="button" class="btn-close" id="close-reader" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-
-        <!-- Modal Content -->
-        <div class="modal-body" id="reader-content">
-          <div class="chapter-content">
-            <!-- Chapter content will be dynamically loaded here -->
-          </div>
-        </div>
-
-        <!-- Modal Footer -->
-        <div class="modal-footer">
-          <button id="prev-chapter-bottom" class="btn btn-outline-secondary">
-            <i class="fas fa-chevron-left me-1"></i> Previous Chapter
-          </button>
-          <button id="next-chapter-bottom" class="btn btn-primary">
-            Next Chapter <i class="fas fa-chevron-right ms-1"></i>
-          </button>
-        </div>
       </div>
     </div>
   </div>
@@ -456,49 +424,75 @@
       }
 
       async function handleRefreshAll() {
+        const progressContainer = document.getElementById('refreshProgressContainer');
+        const bar = document.getElementById('refreshBar');
         const storedData = localStorage.getItem(STORAGE_KEY);
         const mangaData = storedData ? JSON.parse(storedData) : [];
 
         if (mangaData.length === 0) {
-          showError('No manga to refresh');
+          showError('No hay mangas para actualizar');
           return;
         }
 
         const loader = refreshAllBtn.querySelector('.spinner-border');
 
-        // Show loading state
+        // Mostrar estado de carga
+        progressContainer.classList.remove('d-none');
         refreshAllBtn.disabled = true;
         loader.classList.remove('d-none');
 
+        // Inicializar barra
+        bar.classList.remove('bg-success');
+        bar.classList.add('progress-bar-animated', 'progress-bar-striped');
+        bar.style.width = '0%';
+        bar.textContent = '0%';
+
         try {
-          // In a real app, we would loop through all manga entries
-          // and make API calls to update them
-          const updatedMangaData = await Promise.all(
-            mangaData.map(async manga => {
-              try {
-                const updatedManga = await fetchMangaInfo(manga.url);
-                return {
-                  ...manga,
-                  latestChapter: updatedManga.latestChapter
-                };
-              } catch (error) {
-                // Keep existing data if update fails
-                return manga;
-              }
-            })
-          );
+          const updatedMangaData = [];
+
+          for (let i = 0; i < mangaData.length; i++) {
+            const manga = mangaData[i];
+            try {
+              const updatedManga = await fetchMangaInfo(manga.url);
+              updatedMangaData.push({
+                ...manga,
+                latestChapter: updatedManga.latestChapter
+              });
+            } catch (error) {
+              updatedMangaData.push(manga);
+            }
+
+            // Actualizar barra de progreso
+            const percent = Math.round(((i + 1) / mangaData.length) * 100);
+            bar.style.width = `${percent}%`;
+            bar.textContent = `${percent}%`;
+
+            // ⏱️ Esperar entre 1 y 3 segundos antes de la siguiente petición
+            const delay = Math.random() * 2000 + 1000;
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
 
           // Save all updated data
           localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedMangaData));
 
           // Refresh UI
           loadMangaList();
+
+          // Finalizar barra
+          bar.classList.remove('progress-bar-animated', 'progress-bar-striped');
+          bar.classList.add('bg-success');
+          bar.textContent = '¡Listo!';
         } catch (error) {
           showError('Failed to refresh some manga');
         } finally {
           // Hide loading state
           refreshAllBtn.disabled = false;
           loader.classList.add('d-none');
+
+          // Ocultar la barra después de un tiempo (opcional)
+          setTimeout(() => {
+            progressContainer.classList.add('d-none');
+          }, 2000); // Oculta después de 2 segundos
         }
       }
 
