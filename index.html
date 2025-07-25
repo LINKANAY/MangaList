@@ -34,8 +34,10 @@
       line-height: 1.6;
     }
 
-    /* Custom scrollbar */
-    /* ... rest of code ... */
+    .card.alerta-nuevos {
+      background-color: #fff3cd !important;
+      border-radius: 6px;
+    }
 
     /* Add these new styles for card layout */
     .card-body {
@@ -298,48 +300,42 @@
         entryEl.className = 'col mb-4 manga-entry';
         entryEl.dataset.id = manga.id;
 
+        // Calcular capítulos sin leer
+        const unreadCount = Array.isArray(manga.chapterList)
+          ? manga.chapterList.filter(ch => ch > manga.lastReadChapter).length
+          : 0;
+
+        const cardClass = unreadCount > 0 ? 'card h-100 alerta-nuevos' : 'card h-100';
+
         // Build manga entry HTML
         entryEl.innerHTML = `
-    <div class="card h-100">
-      <div class="card-body">
-        <div class="row">
-          <div class="col-sm-8 mb-3 mb-sm-0">
-            <h5 class="card-title">${manga.title}</h5>
-            <p class="card-text text-muted small text-truncate">${manga.url}</p>
-            <div class="d-flex mt-3 gap-4">
-              <div>
-                <span class="text-muted small d-block">Last Read</span>
-                <span class="fw-medium">${manga.lastReadChapter}</span>
-              </div>
-              <div class="vr"></div>
-              <div>
-                <span class="text-muted small d-block">Latest Available</span>
-                <span class="fw-medium">${manga.latestChapter}</span>
+          <div class="${cardClass}">
+            <div class="card-body">
+              <h5 class="card-title">${manga.title}</h5>
+              <p class="card-text">Último leído: Cap. ${manga.lastReadChapter}</p>
+              <p class="card-text">Último disponible: Cap. ${manga.latestChapter}</p>
+              ${unreadCount > 0 ? `
+                <div class="alert alert-warning mt-2 mb-3 py-1 small">
+                  <i class="fas fa-bell me-1"></i> ${unreadCount} capítulo(s) nuevo(s) disponible(s)!
+                </div>
+              ` : ''}
+              <div class="d-flex flex-wrap gap-2">
+                <button class="read-btn btn btn-primary w-100 w-sm-auto">
+                  <i class="fas fa-book-reader me-2"></i> Leer
+                </button>
+                <button class="increment-btn btn btn-success w-100 w-sm-auto">
+                  <i class="fas fa-plus me-2"></i> Siguiente
+                </button>
+                <button class="delete-btn btn btn-danger w-100 w-sm-auto">
+                  <i class="fas fa-trash"></i> Eliminar
+                </button>
+                <button class="refresh-btn btn btn-secondary w-100 w-sm-auto" data-url="${manga.url}">
+                  <i class="fas fa-sync-alt me-2"></i> Refrescar
+                </button>
               </div>
             </div>
           </div>
-          <div class="col-sm-4 d-flex flex-column align-items-start align-items-sm-end">
-            <button class="read-btn btn btn-primary mb-2 w-100 w-sm-auto">
-              <i class="fas fa-book-reader me-2"></i> Read
-            </button>
-            <button class="increment-btn btn btn-outline-secondary mb-2 w-100 w-sm-auto">
-              <i class="fas fa-plus me-2"></i> +1 Leído
-            </button>
-            <button class="refresh-btn btn btn-outline-info mb-2 w-100 w-sm-auto" data-url="${manga.url}">
-              <i class="fas fa-sync-alt me-2"></i> Refresh
-            </button>
-            <button class="delete-btn btn btn-link text-danger p-0">
-              <i class="fas fa-trash"></i> Remove
-            </button>
-          </div>
-        </div>
-        ${manga.latestChapter > manga.lastReadChapter ?
-            `<div class="alert alert-warning mt-3 mb-0 py-2 small">
-            <i class="fas fa-bell me-1"></i> ${manga.latestChapter - manga.lastReadChapter} new chapter(s) available!
-           </div>` : ''}
-      </div>
-    </div>
-  `;
+        `;
 
         // Add event listeners
         const readBtn = entryEl.querySelector('.read-btn');
@@ -365,8 +361,15 @@
             const updated = await fetchMangaInfo(manga.url);
             const stored = JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
             const updatedData = stored.map(m =>
-              m.id === manga.id ? { ...m, latestChapter: updated.latestChapter } : m
+              m.id === manga.id
+                ? {
+                    ...m,
+                    latestChapter: updated.latestChapter,
+                    chapterList: updated.chapterList // ✅ importante
+                  }
+                : m
             );
+
             localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedData));
             loadMangaList();
           } catch (err) {
@@ -589,13 +592,19 @@
         const manga = mangaListData.find(item => item.id === mangaId);
         if (!manga) return;
 
-        if (manga.lastReadChapter < manga.latestChapter) {
-          manga.lastReadChapter += 1;
+        const next = prompt(`Capítulo actual: ${manga.lastReadChapter}\nIngresá el nuevo capítulo leído:`);
+
+        const nextChapter = parseFloat(next);
+        if (!isNaN(nextChapter) && nextChapter <= manga.latestChapter && nextChapter > manga.lastReadChapter) {
+          manga.lastReadChapter = nextChapter;
           localStorage.setItem(STORAGE_KEY, JSON.stringify(mangaListData));
           loadMangaList();
+        } else if (!isNaN(nextChapter) && nextChapter <= manga.lastReadChapter) {
+          alert('Ese capítulo ya fue marcado como leído o es anterior.');
         } else {
-          alert('Ya estás en el capítulo más reciente.');
+          alert('Número de capítulo inválido.');
         }
+
       }
 
       function showError(message) {
@@ -611,16 +620,13 @@
       async function fetchMangaInfo(url) {
         // Simulate network request delay
         await new Promise(resolve => setTimeout(resolve, 1000));
-
         const proxy = 'https://cors-anywhere.herokuapp.com/';
         const response = await fetch(proxy + url);
-
         const html = await response.text();
+
         const parser = new DOMParser();
         const doc = parser.parseFromString(html, 'text/html');
 
-        // Extract manga title and chapter from URL
-        // Example: https://www.leercapitulo.co/leer/muktqzmmlv/el-mejor-sistema-de-jefes/151/
         if (url.includes('/leer/')) {
           try {
             const urlParts = url.split('/');
@@ -630,7 +636,7 @@
             // Extract info from URL parts
             const id = parts[parts.length - 3]; // muktqzmmlv
             const titleSlug = parts[parts.length - 2]; // el-mejor-sistema-de-jefes
-            const currentChapter = parseInt(parts[parts.length - 1], 10); // 151
+            const currentChapter = parseFloat(parts[parts.length - 1]); // 151
 
             // Format title nicely (replace hyphens with spaces, capitalize words)
             const title = titleSlug
@@ -643,17 +649,19 @@
 
             const options = Array.from(dropdown.querySelectorAll('option'));
             const chapterNumbers = options.map(opt => {
-              const val = opt.textContent.trim().match(/\d+/);
-              return val ? parseInt(val[0], 10) : null;
+              const val = opt.textContent.trim().match(/(\d+(\.\d+)?)/);
+              return val ? parseFloat(val[0]) : null;
             }).filter(n => n !== null);
 
-            const latestChapter = Math.max(...chapterNumbers);
-
+            const uniqueChapters = Array.from(new Set(chapterNumbers)).sort((a, b) => a - b);
+            const latestChapter = uniqueChapters[uniqueChapters.length - 1] || 0;
+            
             return {
               url,
               title,
               lastReadChapter: currentChapter,
-              latestChapter
+              latestChapter,
+              chapterList: uniqueChapters
             };
           } catch (error) {
             throw new Error('Invalid manga URL format');
@@ -675,22 +683,21 @@
             const liItems = Array.from(ul.querySelectorAll('li'));
             if (liItems.length === 0) throw new Error('No hay capítulos en la lista');
 
-            // El primer li contiene el capítulo más nuevo
-            const firstLi = liItems[0];
+            const chapterNumbers = liItems.map(li => {
+              const text = li.textContent.trim();
+              const match = text.match(/(\d+(\.\d+)?)/);
+              return match ? parseFloat(match[1]) : null;
+            }).filter(n => n !== null);
 
-            // Obtener texto o enlace dentro del li para extraer número de capítulo
-            // Por ejemplo, puede ser un texto tipo "Capítulo 153" o un link con ese texto
-            let chapterText = firstLi.textContent.trim();
-
-            // Intentar extraer número de capítulo con regex
-            const match = chapterText.match(/\d+/);
-            const latestChapter = match ? parseInt(match[0], 10) : 0;
+            const uniqueChapters = Array.from(new Set(chapterNumbers)).sort((a, b) => a - b);
+            const latestChapter = uniqueChapters[uniqueChapters.length - 1] || 0;
 
             return {
               url,
               title,
               lastReadChapter: 0, // No hay capítulo leído aún
-              latestChapter
+              latestChapter,
+              chapterList: uniqueChapters
             };
           } catch (error) {
             throw new Error('Formato de URL de manga inválido');
