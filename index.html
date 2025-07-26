@@ -323,13 +323,20 @@
                   <i class="fas fa-bell me-1"></i> ${unreadCount} capítulo(s) nuevo(s) disponible(s)!
                 </div>
               ` : ''}
-              <div class="d-flex flex-wrap gap-2">
+              <div class="d-flex flex-wrap gap-2 align-items-center">
                 <button class="read-btn btn btn-primary w-100 w-sm-auto">
                   <i class="fas fa-book-reader me-2"></i> Leer
                 </button>
-                <button class="increment-btn btn btn-success w-100 w-sm-auto">
-                  <i class="fas fa-plus me-2"></i> Siguiente
-                </button>
+
+                <!-- Grupo siguiente + input + ir -->
+                <div class="d-flex gap-1 w-100 w-sm-auto align-items-center">
+                  <button class="increment-btn btn btn-success">
+                    <i class="fas fa-plus me-2"></i> Siguiente
+                  </button>
+                  <input type="number" min="1" class="chapter-input form-control form-control-sm" placeholder="Capítulo" style="width: 70px;">
+                  <button class="go-btn btn btn-secondary btn-sm">Ir</button>
+                </div>
+
                 <button class="delete-btn btn btn-danger w-100 w-sm-auto">
                   <i class="fas fa-trash"></i> Eliminar
                 </button>
@@ -343,22 +350,28 @@
 
 
 
+
         // Add event listeners
+        // Botón Leer
         const readBtn = entryEl.querySelector('.read-btn');
         readBtn.addEventListener('click', () => {
           const chapterUrl = getChapterUrl(manga.url, manga.lastReadChapter);
           window.open(chapterUrl, '_blank');
         });
 
+        // Botón Eliminar
         const deleteBtn = entryEl.querySelector('.delete-btn');
         deleteBtn.addEventListener('click', () => 
-          deleteManga(manga.id));
+          deleteManga(manga.id)
+        );
 
+        // Botón Siguiente (incrementa capítulo leído +1)
         const incrementBtn = entryEl.querySelector('.increment-btn');
         incrementBtn.addEventListener('click', () => {
-          incrementLastReadChapter(manga.id);
+          incrementLastReadChapterAuto(manga.id);  // tu función que incrementa el capítulo leído
         });
 
+        // Botón Refrescar
         const refreshBtn = entryEl.querySelector('.refresh-btn');
         refreshBtn.addEventListener('click', async () => {
           refreshBtn.disabled = true;
@@ -372,7 +385,7 @@
                 ? {
                     ...m,
                     latestChapter: updated.latestChapter,
-                    chapterList: updated.chapterList // ✅ importante
+                    chapterList: updated.chapterList
                   }
                 : m
             );
@@ -390,7 +403,40 @@
           }
         });
 
+        // Botón "Ir" para ir a capítulo específico (nuevo)
+        const goBtn = entryEl.querySelector('.go-btn');
+        const chapterInput = entryEl.querySelector('.chapter-input');
+
+        goBtn.addEventListener('click', () => {
+          const val = Number(chapterInput.value);
+          if (val > 0) {
+            openChapter(manga.url, val);
+            chapterInput.value = '';
+          } else {
+            alert('Ingresa un número válido de capítulo');
+          }
+        });
+
+        chapterInput.addEventListener('keypress', (e) => {
+          if (e.key === 'Enter') {
+            const val = Number(chapterInput.value);
+            if (val > 0) {
+              openChapter(manga.url, val);
+              chapterInput.value = '';
+            } else {
+              alert('Ingresa un número válido de capítulo');
+            }
+          }
+        });
+
         mangaList.appendChild(entryEl);
+
+        function openChapter(baseUrl, chapterNumber) {
+          const chapterUrl = getChapterUrl(baseUrl, chapterNumber);
+          window.open(chapterUrl, '_blank');
+        }
+
+
       }
 
 
@@ -592,27 +638,33 @@
         }
       }
 
-      function incrementLastReadChapter(mangaId) {
+      function incrementLastReadChapterAuto(mangaId) {
         const storedData = localStorage.getItem(STORAGE_KEY);
         const mangaListData = storedData ? JSON.parse(storedData) : [];
 
         const manga = mangaListData.find(item => item.id === mangaId);
-        if (!manga) return;
+        if (!manga || !Array.isArray(manga.chapterList)) return;
 
-        const next = prompt(`Capítulo actual: ${manga.lastReadChapter}\nIngresá el nuevo capítulo leído:`);
+        const current = Number(manga.lastReadChapter);
 
-        const nextChapter = parseFloat(next);
-        if (!isNaN(nextChapter) && nextChapter <= manga.latestChapter && nextChapter > manga.lastReadChapter) {
+        // Convertir todos los capítulos a float y ordenarlos
+        const sortedChapters = [...new Set(manga.chapterList.map(c => parseFloat(c)))]
+          .filter(c => !isNaN(c))
+          .sort((a, b) => a - b);
+
+        // Buscar el siguiente capítulo estrictamente mayor
+        const nextChapter = sortedChapters.find(chap => chap > current);
+
+        if (nextChapter !== undefined) {
           manga.lastReadChapter = nextChapter;
           localStorage.setItem(STORAGE_KEY, JSON.stringify(mangaListData));
           loadMangaList();
-        } else if (!isNaN(nextChapter) && nextChapter <= manga.lastReadChapter) {
-          alert('Ese capítulo ya fue marcado como leído o es anterior.');
         } else {
-          alert('Número de capítulo inválido.');
+          alert('Ya llegaste al último capítulo disponible.');
         }
-
       }
+
+
 
       function showError(message) {
         errorMessage.textContent = message;
