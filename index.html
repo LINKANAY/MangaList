@@ -1,67 +1,894 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="en">
+
 <head>
-<meta charset="utf-8">
-<title>Test CORS - MangaDex API</title>
-<style>
-  body { font-family: system-ui, sans-serif; max-width: 700px; margin: 40px auto; padding: 0 16px; background: #f7f7f9; }
-  h1 { font-size: 1.3rem; }
-  button { padding: 10px 16px; font-size: 1rem; cursor: pointer; border-radius: 6px; border: 1px solid #ccc; background: white; }
-  button:hover { background: #eee; }
-  pre { background: #111; color: #0f0; padding: 12px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; }
-  .ok { color: green; font-weight: bold; }
-  .fail { color: crimson; font-weight: bold; }
-  .card { background: white; padding: 16px; border-radius: 8px; margin-top: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
-</style>
-</head>
-<body>
-  <h1>Test: ¿MangaDex API permite fetch directo desde el navegador?</h1>
-  <p>Este test hace un <code>fetch()</code> real a <code>https://api.mangadex.org/manga</code> sin ningún proxy. Si funciona, vas a ver datos de manga abajo. Si falla por CORS, el navegador va a tirar un error de red en la consola y acá abajo se va a mostrar el mensaje.</p>
-  <button id="btn">Probar fetch a MangaDex</button>
-  <div id="result"></div>
-
-<script>
-document.getElementById('btn').addEventListener('click', async () => {
-  const result = document.getElementById('result');
-  result.innerHTML = '<p>Consultando...</p>';
-
-  const url = 'https://api.mangadex.org/manga?limit=3&order[followedCount]=desc&availableTranslatedLanguage[]=en';
-
-  try {
-    const start = performance.now();
-    const res = await fetch(url);
-    const elapsed = Math.round(performance.now() - start);
-
-    if (!res.ok) {
-      result.innerHTML = `<div class="card"><p class="fail">❌ Respondió pero con status ${res.status}</p></div>`;
-      return;
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MangaTracker - Keep up with your favorite series</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style id="app-style">
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background-color: #f9fafb;
     }
 
-    const data = await res.json();
-    const titles = (data.data || []).map(m => {
-      const attrs = m.attributes || {};
-      const title = attrs.title?.en || Object.values(attrs.title || {})[0] || '(sin título)';
-      return title;
-    });
+    .reader-modal {
+      height: 90vh;
+      overflow-y: auto;
+    }
 
-    result.innerHTML = `
-      <div class="card">
-        <p class="ok">✅ Fetch directo funcionó sin proxy (status ${res.status}, ${elapsed}ms)</p>
-        <p>Esto confirma que MangaDex permite requests CORS desde el navegador.</p>
-        <p><strong>Mangas recibidos:</strong></p>
-        <pre>${titles.map(t => '- ' + t).join('\n')}</pre>
+    .manga-entry:hover {
+      transform: translateY(-2px);
+      transition: all 0.2s ease;
+    }
+
+    .chapter-content img {
+      max-width: 100%;
+      margin: 0 auto;
+    }
+
+    .chapter-content p {
+      margin-bottom: 1rem;
+      line-height: 1.6;
+    }
+
+    .card.alerta-nuevos {
+      background-color: #fff3cd !important;
+      border-radius: 6px;
+    }
+
+    .card-body {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    @media (max-width: 576px) {
+      .manga-entry .card-body {
+        flex-direction: column;
+      }
+    }
+  </style>
+<base target="_blank">
+</head>
+
+<body>
+  <div class="bg-light min-vh-100">
+    <div class="container py-4">
+      <!-- Header -->
+      <header class="mb-4">
+        <div class="d-flex justify-content-between align-items-center">
+          <h1 class="d-flex align-items-center fw-bold text-dark">
+            <i class="fas fa-book-open text-primary me-2"></i>
+            MangaTracker
+          </h1>
+          <div>
+            <button id="refresh-all-btn" class="btn btn-primary d-flex align-items-center">
+              <i class="fas fa-sync-alt me-2"></i>
+              <span>Refresh All</span>
+              <div class="spinner-border spinner-border-sm text-light ms-2 d-none" role="status">
+                <span class="visually-hidden">Loading...</span>
+              </div>
+            </button>
+
+            <button id="export-btn" class="btn btn-outline-secondary d-flex align-items-center">
+              <i class="fas fa-download me-2"></i>
+              <span>Exportar</span>
+            </button>
+
+            <label class="btn btn-outline-secondary d-flex align-items-center mb-0">
+              <i class="fas fa-upload me-2"></i>
+              <span>Importar</span>
+              <input type="file" id="import-input" accept=".json" class="d-none">
+            </label>
+            <button id="clear-btn" class="btn btn-outline-danger d-flex align-items-center">
+              <i class="fas fa-trash-alt me-2"></i>
+              <span>Limpiar Todo</span>
+            </button>
+
+          </div>
+        </div>
+        <p class="text-secondary mt-2">Keep track of your favorite manga chapters in one place</p>
+      </header>
+
+      <!-- URL Input Form -->
+      <div class="card mb-4">
+        <div class="card-body">
+          <form id="url-form" class="row g-3">
+            <div class="col-md">
+              <label for="manga-url" class="form-label">Manga URL</label>
+              <input type="url" id="manga-url" placeholder="https://www.leercapitulo.co/leer/.../manga-name/chapter/"
+                class="form-control" required>
+              <div class="form-text">Enter the URL of the chapter you want to track</div>
+            </div>
+            <div class="col-md-auto d-flex align-items-end">
+              <button type="submit" class="btn btn-primary d-flex align-items-center">
+                <i class="fas fa-plus me-2"></i>
+                <span>Add/Update</span>
+                <div class="spinner-border spinner-border-sm text-light ms-2 d-none" role="status">
+                  <span class="visually-hidden">Loading...</span>
+                </div>
+              </button>
+            </div>
+          </form>
+        </div>
+        <!-- CORS Warning -->
+        <div id="cors-warning" class="alert alert-warning d-flex align-items-start">
+          <i class="fas fa-exclamation-triangle me-3 mt-1"></i>
+          <div>
+            <h5 class="alert-heading">Acceso a capítulos (proxy CORS)</h5>
+            <p>
+              Para cargar datos reales de <code>leercapitulo.co</code> la app usa un proxy CORS.
+              Por defecto usa <strong>cors-anywhere</strong> (gratuito pero con límites estrictos):
+              presioná <strong>"Request temporary access"</strong> en su página demo y volvé acá.
+            </p>
+            <p>
+              <strong>Recomendado:</strong> creá un Cloudflare Worker gratuito y pegá su URL en
+              <code>CONFIG.PROXY_PRIMARY</code> (inicio del script). Así tenés caché propia, límites
+              mucho más altos y menos riesgo de bloqueo.
+            </p>
+            <a href="https://cors-anywhere.herokuapp.com/corsdemo" target="_blank" class="btn btn-warning">🌐 Activar
+              acceso
+              temporal</a>
+          </div>
+        </div>
+
       </div>
-    `;
-  } catch (err) {
-    result.innerHTML = `
-      <div class="card">
-        <p class="fail">❌ Falló el fetch directo</p>
-        <p>Error: ${err.message}</p>
-        <p>Esto sugiere un bloqueo de CORS (revisá también la consola del navegador, ahí suele aparecer el mensaje exacto de "blocked by CORS policy").</p>
+
+      <!-- Contenedor oculto por defecto -->
+      <div id="refreshProgressContainer" class="d-none mt-3">
+        <div class="progress" style="height: 25px;">
+          <div id="refreshBar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar"
+            style="width: 0%;">0%</div>
+        </div>
       </div>
-    `;
-  }
-});
-</script>
+
+
+      <div class="form-check mt-3">
+        <input class="form-check-input" type="checkbox" id="filter-unread">
+        <label class="form-check-label" for="filter-unread">
+          Mostrar solo mangas con capítulos por leer
+        </label>
+      </div>
+
+
+      <!-- Error Alert (hidden by default) -->
+      <div id="error-alert" class="alert alert-danger alert-dismissible fade show d-none mb-4" role="alert">
+        <div class="d-flex align-items-center">
+          <i class="fas fa-exclamation-circle me-2"></i>
+          <span id="error-message">Error message will appear here</span>
+        </div>
+        <button id="close-error" type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+      </div>
+
+      <!-- Success Alert (hidden by default) -->
+      <div id="success-alert" class="alert alert-success alert-dismissible fade show d-none mb-4" role="alert">
+        <div class="d-flex align-items-center">
+          <i class="fas fa-check-circle me-2"></i>
+          <span id="success-message"></span>
+        </div>
+        <button id="close-success" type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+      </div>
+
+      <!-- Empty state (shown when no manga are tracked) -->
+      <div id="empty-state" class="text-center py-5 bg-white rounded shadow">
+        <div class="row align-items-center">
+          <div class="col-auto">
+            <div class="d-inline-flex align-items-center justify-content-center bg-light rounded-circle mb-0"
+              style="width: 64px; height: 64px;">
+              <i class="fas fa-book text-primary fs-4"></i>
+            </div>
+          </div>
+          <div class="col text-start">
+            <h3 class="fw-medium text-dark mb-2">No manga tracked yet</h3>
+            <p class="text-secondary mx-0 mb-3">Add your first manga URL using the form above to start tracking
+              chapters.</p>
+            <p class="text-muted small">Example:
+              https://www.leercapitulo.co/leer/muktqzmmlv/el-mejor-sistema-de-jefes/151/</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Manga List -->
+      <div id="manga-list" class="row row-cols-1 row-cols-sm-2 row-cols-lg-3 d-none" style="overflow-x: hidden;">
+        <!-- Manga entries will be dynamically added here -->
+      </div>
+    </div>
+  </div>
+
+  <script id="app-script">
+    document.addEventListener('DOMContentLoaded', function () {
+      // ==================== CONFIGURACIÓN ====================
+      const CONFIG = {
+        // Opcional: URL de tu propio Cloudflare Worker, p.ej.
+        // 'https://tu-worker.tu-usuario.workers.dev/?url='
+        // Si queda vacío, se usa el proxy público de respaldo.
+        PROXY_PRIMARY: '',
+        PROXY_FALLBACK: 'https://cors-anywhere.herokuapp.com/',
+        REQUEST_TIMEOUT_MS: 10000,        // abortar peticiones que tarden más de 10s
+        MIN_DELAY_MS: 2000,               // delay mínimo entre peticiones del lote
+        MAX_DELAY_MS: 4000,               // delay máximo (aleatorio entre min y max)
+        MAX_RETRIES: 3,                   // reintentos ante bloqueos 429/403 o fallos de red
+        BLOCKED_STATUSES: [429, 403],     // statuses que indican rate-limit / bloqueo
+        CIRCUIT_BREAKER: 3,               // cancelar el lote tras N bloqueos consecutivos
+        FRESHNESS_MS: 6 * 60 * 60 * 1000, // no refrescar mangas actualizados hace < 6h
+        BATCH_TIMEOUT_MS: 5 * 60 * 1000,  // cancelar el lote completo tras 5 min
+      };
+
+      // ==================== HELPERS ====================
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const randomDelay = () => CONFIG.MIN_DELAY_MS + Math.random() * (CONFIG.MAX_DELAY_MS - CONFIG.MIN_DELAY_MS);
+
+      function getProxies() {
+        const list = [];
+        if (CONFIG.PROXY_PRIMARY) list.push(CONFIG.PROXY_PRIMARY);
+        list.push(CONFIG.PROXY_FALLBACK);
+        return list;
+      }
+
+      function timeAgo(ts) {
+        if (!ts) return 'nunca';
+        const s = Math.floor((Date.now() - ts) / 1000);
+        if (s < 60) return 'hace un momento';
+        const m = Math.floor(s / 60);
+        if (m < 60) return `hace ${m} min`;
+        const h = Math.floor(m / 60);
+        if (h < 24) return `hace ${h} h`;
+        return `hace ${Math.floor(h / 24)} días`;
+      }
+
+      function friendlyError(err) {
+        if (!err) return 'Error desconocido';
+        if (err.type === 'blocked') return `El sitio/proxy está limitando las peticiones (HTTP ${err.status}). Probá más tarde.`;
+        if (err.type === 'network') return `Fallo de red o del proxy: ${err.message}`;
+        if (err.type === 'http') return `Error HTTP ${err.status}`;
+        return err.message || 'Error desconocido';
+      }
+
+      // ==================== NÚCLEO DE RED (CON RESILIENCIA) ====================
+      // Toda petición pasa por acá: timeout, reintentos con backoff
+      // exponencial + jitter, respeto de Retry-After y errores clasificados.
+      async function fetchConResiliencia(targetUrl, { headers = {} } = {}) {
+        const proxies = getProxies();
+        let lastError = { type: 'network', message: 'Sin proxies configurados' };
+
+        for (let attempt = 0; attempt <= CONFIG.MAX_RETRIES; attempt++) {
+          const proxy = proxies[Math.min(attempt, proxies.length - 1)];
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), CONFIG.REQUEST_TIMEOUT_MS);
+          try {
+            const response = await fetch(proxy + targetUrl, { headers, signal: controller.signal });
+            clearTimeout(timer);
+
+            if (response.status === 304) {
+              return { status: 304, html: null, etag: null, lastModified: null };
+            }
+            if (response.ok) {
+              return {
+                status: 200,
+                html: await response.text(),
+                etag: response.headers.get('ETag'),
+                lastModified: response.headers.get('Last-Modified'),
+              };
+            }
+            if (CONFIG.BLOCKED_STATUSES.includes(response.status)) {
+              const retryAfterSec = parseInt(response.headers.get('Retry-After'), 10);
+              const backoffMs = retryAfterSec
+                ? retryAfterSec * 1000
+                : Math.min(15000 * Math.pow(2, attempt), 60000) + Math.random() * 2000;
+              lastError = { type: 'blocked', status: response.status, waitMs: backoffMs };
+              if (attempt < CONFIG.MAX_RETRIES) await sleep(backoffMs);
+              continue;
+            }
+            // Otro error HTTP (404, 500...): no vale la pena reintentar
+            throw { type: 'http', status: response.status, message: `HTTP ${response.status}` };
+          } catch (err) {
+            clearTimeout(timer);
+            if (err && err.type) throw err; // error ya clasificado, propagar
+            lastError = {
+              type: 'network',
+              message: err.name === 'AbortError' ? 'tiempo de espera agotado (10s)' : err.message,
+            };
+            if (attempt < CONFIG.MAX_RETRIES) {
+              await sleep(2000 * (attempt + 1) + Math.random() * 1000);
+            }
+          }
+        }
+        throw lastError;
+      }
+
+      // ==================== PARSING ====================
+      function parseMangaHtml(html, url) {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+
+        if (url.includes('/leer/')) {
+          const urlParts = url.split('/');
+          const parts = urlParts.filter(part => part);
+
+          const titleSlug = parts[parts.length - 2];
+          const currentChapter = parseFloat(parts[parts.length - 1]);
+          if (!titleSlug || isNaN(currentChapter)) throw new Error('Formato de URL de capítulo inválido');
+
+          const title = titleSlug
+            .split('-')
+            .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+            .join(' ');
+
+          const dropdown = doc.querySelector('.dropdown-manga');
+          if (!dropdown) throw new Error('No se encontró el selector de capítulos');
+
+          const options = Array.from(dropdown.querySelectorAll('option'));
+          const chapterNumbers = options.map(opt => {
+            const val = opt.textContent.trim().match(/(\d+(\.\d+)?)/);
+            return val ? parseFloat(val[0]) : null;
+          }).filter(n => n !== null);
+
+          const uniqueChapters = Array.from(new Set(chapterNumbers)).sort((a, b) => a - b);
+          return {
+            url,
+            title,
+            lastReadChapter: currentChapter,
+            latestChapter: uniqueChapters[uniqueChapters.length - 1] || 0,
+            chapterList: uniqueChapters
+          };
+        }
+
+        if (url.includes('/manga/')) {
+          const titleEl = doc.querySelector('h1.title-manga');
+          const title = titleEl ? titleEl.textContent.trim() : 'Título desconocido';
+
+          const chapterListDiv = doc.querySelector('.chapter-list');
+          if (!chapterListDiv) throw new Error('No se encontró el contenedor chapter-list');
+          const ul = chapterListDiv.querySelector('ul');
+          if (!ul) throw new Error('No se encontró la lista de capítulos (ul)');
+
+          const liItems = Array.from(ul.querySelectorAll('li'));
+          if (liItems.length === 0) throw new Error('No hay capítulos en la lista');
+
+          const chapterNumbers = liItems.map(li => {
+            const text = li.textContent.trim();
+            const match = text.match(/(\d+(\.\d+)?)/);
+            return match ? parseFloat(match[1]) : null;
+          }).filter(n => n !== null);
+
+          const uniqueChapters = Array.from(new Set(chapterNumbers)).sort((a, b) => a - b);
+          return {
+            url,
+            title,
+            lastReadChapter: 0,
+            latestChapter: uniqueChapters[uniqueChapters.length - 1] || 0,
+            chapterList: uniqueChapters
+          };
+        }
+
+        throw new Error('URL no reconocida para manga o capítulo');
+      }
+
+      // ==================== REFRESH INTELIGENTE ====================
+      function buildUpdated(manga, parsed, res, now) {
+        return {
+          ...manga,
+          title: parsed.title || manga.title,
+          // Nunca bajar el capítulo leído: si la URL agregada tiene un capítulo
+          // mayor que el guardado, se respeta el mayor.
+          lastReadChapter: Math.max(Number(manga.lastReadChapter) || 0, Number(parsed.lastReadChapter) || 0),
+          latestChapter: parsed.latestChapter ?? manga.latestChapter,
+          chapterList: parsed.chapterList || manga.chapterList,
+          lastFetchedAt: now,
+          fetchMeta: {
+            etag: res.etag || undefined,
+            lastModified: res.lastModified || undefined,
+          },
+        };
+      }
+
+      // Refresca un manga con petición condicional (ETag / If-Modified-Since).
+      // Si el servidor responde 304, reutiliza los datos guardados.
+      async function refreshMangaData(manga) {
+        const cached = manga.fetchMeta || {};
+        const headers = {};
+        if (cached.etag) headers['If-None-Match'] = cached.etag;
+        if (cached.lastModified) headers['If-Modified-Since'] = cached.lastModified;
+
+        const res = await fetchConResiliencia(manga.url, { headers });
+        const now = Date.now();
+
+        if (res.status === 304) {
+          if (Array.isArray(manga.chapterList) && manga.chapterList.length) {
+            // No modificado: solo actualizar el timestamp
+            return { ...manga, lastFetchedAt: now };
+          }
+          // 304 pero sin datos cacheados para reutilizar: fetch completo
+          const fresh = await fetchConResiliencia(manga.url, {});
+          return buildUpdated(manga, parseMangaHtml(fresh.html, manga.url), fresh, now);
+        }
+
+        return buildUpdated(manga, parseMangaHtml(res.html, manga.url), res, now);
+      }
+
+      // Para agregar mangas nuevos desde el formulario
+      async function fetchMangaInfo(url) {
+        const res = await fetchConResiliencia(url, {});
+        const parsed = parseMangaHtml(res.html, url);
+        return {
+          ...parsed,
+          lastFetchedAt: Date.now(),
+          fetchMeta: {
+            etag: res.etag || undefined,
+            lastModified: res.lastModified || undefined,
+          },
+        };
+      }
+
+      // ==================== DOM ====================
+      const urlForm = document.getElementById('url-form');
+      const urlInput = document.getElementById('manga-url');
+      const refreshAllBtn = document.getElementById('refresh-all-btn');
+      const emptyState = document.getElementById('empty-state');
+      const mangaList = document.getElementById('manga-list');
+      const errorAlert = document.getElementById('error-alert');
+      const errorMessage = document.getElementById('error-message');
+      const closeError = document.getElementById('close-error');
+      const successAlert = document.getElementById('success-alert');
+      const successMessage = document.getElementById('success-message');
+      const closeSuccess = document.getElementById('close-success');
+
+      const STORAGE_KEY = 'manga-tracker-data';
+
+      init();
+
+      function init() {
+        loadMangaList();
+
+        urlForm.addEventListener('submit', handleAddManga);
+        refreshAllBtn.addEventListener('click', handleRefreshAll);
+        closeError.addEventListener('click', hideError);
+        closeSuccess.addEventListener('click', hideSuccess);
+        document.getElementById('filter-unread').addEventListener('change', loadMangaList);
+
+        document.getElementById('export-btn').addEventListener('click', () => {
+          const data = localStorage.getItem(STORAGE_KEY);
+          if (!data) return alert('No hay datos para exportar.');
+
+          const blob = new Blob([data], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'manga-tracker.json';
+          a.click();
+          URL.revokeObjectURL(url);
+        });
+
+        document.getElementById('import-input').addEventListener('change', (event) => {
+          const file = event.target.files[0];
+          if (!file) return;
+
+          const reader = new FileReader();
+          reader.onload = function (e) {
+            try {
+              const json = JSON.parse(e.target.result);
+              if (!Array.isArray(json)) throw new Error('Formato inválido');
+              localStorage.setItem(STORAGE_KEY, JSON.stringify(json));
+              loadMangaList();
+              showSuccess('Lista importada correctamente');
+            } catch (err) {
+              showError('Error al importar el archivo: ' + err.message);
+            }
+          };
+          reader.readAsText(file);
+        });
+
+        document.getElementById('clear-btn').addEventListener('click', () => {
+          const confirmClear = confirm('¿Estás seguro de que querés borrar toda la lista de mangas? Esta acción no se puede deshacer.');
+          if (!confirmClear) return;
+
+          localStorage.removeItem(STORAGE_KEY);
+          loadMangaList();
+        });
+      }
+
+      function loadMangaList() {
+        const storedData = localStorage.getItem(STORAGE_KEY);
+        let mangaData = storedData ? JSON.parse(storedData) : [];
+
+        const filterUnread = document.getElementById('filter-unread');
+        const onlyUnread = filterUnread && filterUnread.checked;
+
+        if (onlyUnread) {
+          mangaData = mangaData.filter(manga =>
+            manga.latestChapter != null &&
+            manga.lastReadChapter != null &&
+            parseFloat(manga.latestChapter) > parseFloat(manga.lastReadChapter)
+          );
+        }
+
+        mangaData.sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }));
+
+        if (mangaData.length > 0) {
+          emptyState.classList.add('d-none');
+          mangaList.classList.remove('d-none');
+
+          mangaList.innerHTML = '';
+          mangaData.forEach(manga => {
+            renderMangaEntry(manga);
+          });
+        } else {
+          emptyState.classList.remove('d-none');
+          mangaList.classList.add('d-none');
+        }
+      }
+
+      function renderMangaEntry(manga) {
+        const entryEl = document.createElement('div');
+        entryEl.className = 'col mb-4 manga-entry';
+        entryEl.dataset.id = manga.id;
+
+        const unreadCount = Array.isArray(manga.chapterList)
+          ? manga.chapterList.filter(ch => ch > manga.lastReadChapter).length
+          : 0;
+
+        const cardClass = unreadCount > 0 ? 'card h-100 alerta-nuevos' : 'card h-100';
+
+        entryEl.innerHTML = `
+          <div class="${cardClass}">
+            <div class="card-body">
+              <h5 class="card-title">${manga.title}</h5>
+              <p class="card-text">Último leído: Cap. ${manga.lastReadChapter}</p>
+              <p class="card-text">Último disponible: Cap. ${manga.latestChapter}</p>
+              <p class="card-text text-muted small mb-2">
+                <i class="fas fa-clock me-1"></i> Actualizado ${timeAgo(manga.lastFetchedAt)}
+              </p>
+              ${unreadCount > 0 ? `
+                <div class="alert alert-warning mt-2 mb-3 py-1 small">
+                  <i class="fas fa-bell me-1"></i> ${unreadCount} capítulo(s) nuevo(s) disponible(s)!
+                </div>
+              ` : ''}
+              <div class="d-flex flex-wrap gap-2 align-items-center">
+                <button class="read-btn btn btn-primary w-100 w-sm-auto">
+                  <i class="fas fa-book-reader me-2"></i> Leer
+                </button>
+
+                <div class="d-flex gap-1 w-100 w-sm-auto align-items-center">
+                  <button class="increment-btn btn btn-success">
+                    <i class="fas fa-plus me-2"></i> Siguiente
+                  </button>
+                  <input type="number" min="1" class="chapter-input form-control form-control-sm" placeholder="Capítulo" style="width: 70px;">
+                  <button class="go-btn btn btn-secondary btn-sm">Ir</button>
+                </div>
+
+                <button class="delete-btn btn btn-danger w-100 w-sm-auto">
+                  <i class="fas fa-trash"></i> Eliminar
+                </button>
+                <button class="refresh-btn btn btn-secondary w-100 w-sm-auto" data-url="${manga.url}">
+                  <i class="fas fa-sync-alt me-2"></i> Refrescar
+                </button>
+              </div>
+            </div>
+          </div>
+        `;
+
+        const readBtn = entryEl.querySelector('.read-btn');
+        readBtn.addEventListener('click', () => {
+          const chapterUrl = getChapterUrl(manga.url, manga.lastReadChapter);
+          window.open(chapterUrl, '_blank');
+        });
+
+        const deleteBtn = entryEl.querySelector('.delete-btn');
+        deleteBtn.addEventListener('click', () => deleteManga(manga.id));
+
+        const incrementBtn = entryEl.querySelector('.increment-btn');
+        incrementBtn.addEventListener('click', () => {
+          incrementLastReadChapterAuto(manga.id);
+        });
+
+        const refreshBtn = entryEl.querySelector('.refresh-btn');
+        refreshBtn.addEventListener('click', async () => {
+          refreshBtn.disabled = true;
+          refreshBtn.innerHTML = `<i class="fas fa-spinner fa-spin me-2"></i> Updating...`;
+
+          try {
+            const updated = await refreshMangaData(manga);
+            const stored = JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+            const updatedData = stored.map(m => (m.id === manga.id ? updated : m));
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedData));
+            loadMangaList();
+          } catch (err) {
+            showError(`Error actualizando ${manga.title}: ${friendlyError(err)}`);
+            refreshBtn.innerHTML = `<i class="fas fa-exclamation-circle me-2"></i> Error`;
+          } finally {
+            setTimeout(() => {
+              refreshBtn.disabled = false;
+              refreshBtn.innerHTML = `<i class="fas fa-sync-alt me-2"></i> Refresh`;
+            }, 1500);
+          }
+        });
+
+        const goBtn = entryEl.querySelector('.go-btn');
+        const chapterInput = entryEl.querySelector('.chapter-input');
+
+        const tryGo = () => {
+          const val = Number(chapterInput.value);
+          if (val > 0) {
+            openChapter(manga.url, val);
+            chapterInput.value = '';
+          } else {
+            alert('Ingresa un número válido de capítulo');
+          }
+        };
+
+        goBtn.addEventListener('click', tryGo);
+        chapterInput.addEventListener('keypress', (e) => {
+          if (e.key === 'Enter') tryGo();
+        });
+
+        mangaList.appendChild(entryEl);
+
+        function openChapter(baseUrl, chapterNumber) {
+          const chapterUrl = getChapterUrl(baseUrl, chapterNumber);
+          window.open(chapterUrl, '_blank');
+        }
+      }
+
+      async function handleAddManga(e) {
+        e.preventDefault();
+        const url = urlInput.value.trim();
+
+        if (!url) {
+          showError('Please enter a valid URL');
+          return;
+        }
+
+        if (!url.includes('leercapitulo.co/leer/') && !url.includes('leercapitulo.co/manga/')) {
+          showError('URL must be from leercapitulo.co/leer/ or leercapitulo.co/manga/');
+          return;
+        }
+
+        const submitBtn = urlForm.querySelector('button[type="submit"]');
+        const loader = submitBtn.querySelector('.spinner-border');
+
+        submitBtn.disabled = true;
+        loader.classList.remove('d-none');
+
+        try {
+          const mangaData = await fetchMangaInfo(url);
+
+          const storedData = localStorage.getItem(STORAGE_KEY);
+          const existingData = storedData ? JSON.parse(storedData) : [];
+
+          const alreadyExists = existingData.some(item => item.title.toLowerCase() === mangaData.title.toLowerCase());
+
+          if (alreadyExists) {
+            const confirmUpdate = confirm('Este manga ya está en tu lista. ¿Querés actualizar su información con este capítulo como "último leído"?');
+            if (!confirmUpdate) return;
+          }
+
+          saveManga(mangaData);
+
+          urlInput.value = '';
+          hideError();
+
+          loadMangaList();
+        } catch (error) {
+          showError(friendlyError(error));
+        } finally {
+          submitBtn.disabled = false;
+          loader.classList.add('d-none');
+        }
+      }
+
+      async function handleRefreshAll() {
+        const progressContainer = document.getElementById('refreshProgressContainer');
+        const bar = document.getElementById('refreshBar');
+        const storedData = localStorage.getItem(STORAGE_KEY);
+        const allManga = storedData ? JSON.parse(storedData) : [];
+
+        if (allManga.length === 0) {
+          showError('No hay mangas para actualizar');
+          return;
+        }
+
+        // Separar frescos de obsoletos: los frescos no generan peticiones
+        const now = Date.now();
+        const fresh = allManga.filter(m => m.lastFetchedAt && (now - m.lastFetchedAt) < CONFIG.FRESHNESS_MS);
+        const stale = allManga.filter(m => !m.lastFetchedAt || (now - m.lastFetchedAt) >= CONFIG.FRESHNESS_MS);
+
+        if (stale.length === 0) {
+          showSuccess(`Todo está al día: los ${fresh.length} mangas se actualizaron en las últimas 6 horas.`);
+          return;
+        }
+
+        const loader = refreshAllBtn.querySelector('.spinner-border');
+
+        progressContainer.classList.remove('d-none');
+        refreshAllBtn.disabled = true;
+        loader.classList.remove('d-none');
+
+        bar.classList.remove('bg-success');
+        bar.classList.add('progress-bar-animated', 'progress-bar-striped');
+        bar.style.width = '0%';
+        bar.textContent = '0%';
+
+        const batchDeadline = now + CONFIG.BATCH_TIMEOUT_MS;
+        const updatedMap = new Map();
+        const failures = [];
+        let okCount = 0;
+        let consecutiveBlocked = 0;
+        let cancelledEarly = false;
+
+        try {
+          for (let i = 0; i < stale.length; i++) {
+            // Límite total del lote
+            if (Date.now() > batchDeadline) {
+              stale.slice(i).forEach(m => failures.push(`${m.title} (tiempo agotado)`));
+              cancelledEarly = true;
+              break;
+            }
+
+            const manga = stale[i];
+            try {
+              const updated = await refreshMangaData(manga);
+              updatedMap.set(manga.id, updated);
+              okCount++;
+              consecutiveBlocked = 0;
+            } catch (err) {
+              failures.push(manga.title);
+              if (err && err.type === 'blocked') {
+                consecutiveBlocked++;
+                // Circuit breaker: el sitio nos está limitando, no seguir martillando
+                if (consecutiveBlocked >= CONFIG.CIRCUIT_BREAKER) {
+                  stale.slice(i + 1).forEach(m => failures.push(m.title));
+                  showError(`El sitio está limitando las peticiones (HTTP ${err.status}). Lote cancelado; probá de nuevo en 1 hora.`);
+                  cancelledEarly = true;
+                  break;
+                }
+              } else {
+                consecutiveBlocked = 0;
+              }
+            }
+
+            const percent = Math.round(((i + 1) / stale.length) * 100);
+            bar.style.width = `${percent}%`;
+            bar.textContent = `${percent}%`;
+
+            // Delay aleatorio entre peticiones (excepto tras el último)
+            if (i < stale.length - 1) await sleep(randomDelay());
+          }
+
+          // Guardar solo si hubo cambios
+          if (updatedMap.size > 0) {
+            const merged = allManga.map(m => updatedMap.get(m.id) || m);
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+          }
+
+          bar.classList.remove('progress-bar-animated', 'progress-bar-striped');
+          bar.classList.add('bg-success');
+          bar.textContent = '¡Listo!';
+
+          loadMangaList();
+
+          // Resumen del lote
+          let summary = `✅ ${okCount} actualizados · ⏭ ${fresh.length} ya al día · ❌ ${failures.length} fallaron`;
+          if (failures.length > 0) {
+            const shown = failures.slice(0, 5).join(', ');
+            summary += ` (${shown}${failures.length > 5 ? '…' : ''})`;
+          }
+          if (cancelledEarly) {
+            showSuccess(summary + ' — el lote se canceló antes de completarse.');
+          } else {
+            showSuccess(summary);
+          }
+        } finally {
+          setTimeout(() => {
+            progressContainer.classList.add('d-none');
+          }, 2000);
+
+          refreshAllBtn.disabled = false;
+          loader.classList.add('d-none');
+        }
+      }
+
+      function getChapterUrl(baseUrl, chapterNumber) {
+        const parts = baseUrl.split('/');
+        if (parts[parts.length - 1] === '') parts.pop();
+        parts[parts.length - 1] = chapterNumber.toString();
+
+        let finalUrl = parts.join('/');
+        if (!finalUrl.endsWith('/')) {
+          finalUrl += '/';
+        }
+        return finalUrl;
+      }
+
+      function saveManga(mangaData) {
+        const storedData = localStorage.getItem(STORAGE_KEY);
+        const existingData = storedData ? JSON.parse(storedData) : [];
+
+        const existingIndex = existingData.findIndex(item => item.title.toLowerCase() === mangaData.title.toLowerCase());
+
+        if (existingIndex >= 0) {
+          const existing = existingData[existingIndex];
+
+          const updatedLastRead = mangaData.lastReadChapter > existing.lastReadChapter
+            ? mangaData.lastReadChapter
+            : existing.lastReadChapter;
+
+          existingData[existingIndex] = {
+            ...existing,
+            lastReadChapter: updatedLastRead,
+            latestChapter: mangaData.latestChapter,
+            chapterList: mangaData.chapterList || existing.chapterList,
+            fetchMeta: mangaData.fetchMeta || existing.fetchMeta,
+            lastFetchedAt: mangaData.lastFetchedAt || Date.now(),
+          };
+        } else {
+          existingData.push({
+            id: Date.now().toString(),
+            ...mangaData
+          });
+        }
+
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(existingData));
+      }
+
+      function deleteManga(id) {
+        if (confirm('Are you sure you want to remove this manga from your tracker?')) {
+          const storedData = localStorage.getItem(STORAGE_KEY);
+          const existingData = storedData ? JSON.parse(storedData) : [];
+
+          const updatedData = existingData.filter(manga => manga.id !== id);
+
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedData));
+          loadMangaList();
+        }
+      }
+
+      function incrementLastReadChapterAuto(mangaId) {
+        const storedData = localStorage.getItem(STORAGE_KEY);
+        const mangaListData = storedData ? JSON.parse(storedData) : [];
+
+        const manga = mangaListData.find(item => item.id === mangaId);
+        if (!manga || !Array.isArray(manga.chapterList)) return;
+
+        const current = Number(manga.lastReadChapter);
+
+        const sortedChapters = [...new Set(manga.chapterList.map(c => parseFloat(c)))]
+          .filter(c => !isNaN(c))
+          .sort((a, b) => a - b);
+
+        const nextChapter = sortedChapters.find(chap => chap > current);
+
+        if (nextChapter !== undefined) {
+          manga.lastReadChapter = nextChapter;
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(mangaListData));
+          loadMangaList();
+        } else {
+          alert('Ya llegaste al último capítulo disponible.');
+        }
+      }
+
+      function showError(message) {
+        errorMessage.textContent = message;
+        errorAlert.classList.remove('d-none');
+      }
+
+      function hideError() {
+        errorAlert.classList.add('d-none');
+      }
+
+      function showSuccess(message) {
+        successMessage.textContent = message;
+        successAlert.classList.remove('d-none');
+      }
+
+      function hideSuccess() {
+        successAlert.classList.add('d-none');
+      }
+    });
+  </script>
 </body>
+
 </html>
