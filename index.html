@@ -39,7 +39,6 @@
       border-radius: 6px;
     }
 
-    /* Add these new styles for card layout */
     .card-body {
       display: flex;
       flex-direction: column;
@@ -52,6 +51,7 @@
       }
     }
   </style>
+<base target="_blank">
 </head>
 
 <body>
@@ -118,14 +118,16 @@
         <div id="cors-warning" class="alert alert-warning d-flex align-items-start">
           <i class="fas fa-exclamation-triangle me-3 mt-1"></i>
           <div>
-            <h5 class="alert-heading">Activá el acceso a capítulos</h5>
+            <h5 class="alert-heading">Acceso a capítulos (proxy CORS)</h5>
             <p>
-              Para que la aplicación pueda cargar información real de los mangas desde <code>leercapitulo.co</code>,
-              necesitás activar el proxy gratuito de <strong>cors-anywhere</strong>.
+              Para cargar datos reales de <code>leercapitulo.co</code> la app usa un proxy CORS.
+              Por defecto usa <strong>cors-anywhere</strong> (gratuito pero con límites estrictos):
+              presioná <strong>"Request temporary access"</strong> en su página demo y volvé acá.
             </p>
             <p>
-              Hacé clic en el botón de abajo, luego presioná el botón <strong>"Request temporary access"</strong> en esa
-              página. Después, volvé acá y usá "Agregar" o "Refresh".
+              <strong>Recomendado:</strong> creá un Cloudflare Worker gratuito y pegá su URL en
+              <code>CONFIG.PROXY_PRIMARY</code> (inicio del script). Así tenés caché propia, límites
+              mucho más altos y menos riesgo de bloqueo.
             </p>
             <a href="https://cors-anywhere.herokuapp.com/corsdemo" target="_blank" class="btn btn-warning">🌐 Activar
               acceso
@@ -161,6 +163,15 @@
         <button id="close-error" type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
       </div>
 
+      <!-- Success Alert (hidden by default) -->
+      <div id="success-alert" class="alert alert-success alert-dismissible fade show d-none mb-4" role="alert">
+        <div class="d-flex align-items-center">
+          <i class="fas fa-check-circle me-2"></i>
+          <span id="success-message"></span>
+        </div>
+        <button id="close-success" type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+      </div>
+
       <!-- Empty state (shown when no manga are tracked) -->
       <div id="empty-state" class="text-center py-5 bg-white rounded shadow">
         <div class="row align-items-center">
@@ -189,11 +200,230 @@
 
   <script id="app-script">
     document.addEventListener('DOMContentLoaded', function () {
-      const filterCheckbox = document.getElementById("filter-unread");
-      filterCheckbox.addEventListener("change", () => {
-        loadMangaList();
-      });
-      // DOM elements
+      // ==================== CONFIGURACIÓN ====================
+      const CONFIG = {
+        // Opcional: URL de tu propio Cloudflare Worker, p.ej.
+        // 'https://tu-worker.tu-usuario.workers.dev/?url='
+        // Si queda vacío, se usa el proxy público de respaldo.
+        PROXY_PRIMARY: '',
+        PROXY_FALLBACK: 'https://cors-anywhere.herokuapp.com/',
+        REQUEST_TIMEOUT_MS: 10000,        // abortar peticiones que tarden más de 10s
+        MIN_DELAY_MS: 2000,               // delay mínimo entre peticiones del lote
+        MAX_DELAY_MS: 4000,               // delay máximo (aleatorio entre min y max)
+        MAX_RETRIES: 3,                   // reintentos ante bloqueos 429/403 o fallos de red
+        BLOCKED_STATUSES: [429, 403],     // statuses que indican rate-limit / bloqueo
+        CIRCUIT_BREAKER: 3,               // cancelar el lote tras N bloqueos consecutivos
+        FRESHNESS_MS: 6 * 60 * 60 * 1000, // no refrescar mangas actualizados hace < 6h
+        BATCH_TIMEOUT_MS: 5 * 60 * 1000,  // cancelar el lote completo tras 5 min
+      };
+
+      // ==================== HELPERS ====================
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const randomDelay = () => CONFIG.MIN_DELAY_MS + Math.random() * (CONFIG.MAX_DELAY_MS - CONFIG.MIN_DELAY_MS);
+
+      function getProxies() {
+        const list = [];
+        if (CONFIG.PROXY_PRIMARY) list.push(CONFIG.PROXY_PRIMARY);
+        list.push(CONFIG.PROXY_FALLBACK);
+        return list;
+      }
+
+      function timeAgo(ts) {
+        if (!ts) return 'nunca';
+        const s = Math.floor((Date.now() - ts) / 1000);
+        if (s < 60) return 'hace un momento';
+        const m = Math.floor(s / 60);
+        if (m < 60) return `hace ${m} min`;
+        const h = Math.floor(m / 60);
+        if (h < 24) return `hace ${h} h`;
+        return `hace ${Math.floor(h / 24)} días`;
+      }
+
+      function friendlyError(err) {
+        if (!err) return 'Error desconocido';
+        if (err.type === 'blocked') return `El sitio/proxy está limitando las peticiones (HTTP ${err.status}). Probá más tarde.`;
+        if (err.type === 'network') return `Fallo de red o del proxy: ${err.message}`;
+        if (err.type === 'http') return `Error HTTP ${err.status}`;
+        return err.message || 'Error desconocido';
+      }
+
+      // ==================== NÚCLEO DE RED (CON RESILIENCIA) ====================
+      // Toda petición pasa por acá: timeout, reintentos con backoff
+      // exponencial + jitter, respeto de Retry-After y errores clasificados.
+      async function fetchConResiliencia(targetUrl, { headers = {} } = {}) {
+        const proxies = getProxies();
+        let lastError = { type: 'network', message: 'Sin proxies configurados' };
+
+        for (let attempt = 0; attempt <= CONFIG.MAX_RETRIES; attempt++) {
+          const proxy = proxies[Math.min(attempt, proxies.length - 1)];
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), CONFIG.REQUEST_TIMEOUT_MS);
+          try {
+            const response = await fetch(proxy + targetUrl, { headers, signal: controller.signal });
+            clearTimeout(timer);
+
+            if (response.status === 304) {
+              return { status: 304, html: null, etag: null, lastModified: null };
+            }
+            if (response.ok) {
+              return {
+                status: 200,
+                html: await response.text(),
+                etag: response.headers.get('ETag'),
+                lastModified: response.headers.get('Last-Modified'),
+              };
+            }
+            if (CONFIG.BLOCKED_STATUSES.includes(response.status)) {
+              const retryAfterSec = parseInt(response.headers.get('Retry-After'), 10);
+              const backoffMs = retryAfterSec
+                ? retryAfterSec * 1000
+                : Math.min(15000 * Math.pow(2, attempt), 60000) + Math.random() * 2000;
+              lastError = { type: 'blocked', status: response.status, waitMs: backoffMs };
+              if (attempt < CONFIG.MAX_RETRIES) await sleep(backoffMs);
+              continue;
+            }
+            // Otro error HTTP (404, 500...): no vale la pena reintentar
+            throw { type: 'http', status: response.status, message: `HTTP ${response.status}` };
+          } catch (err) {
+            clearTimeout(timer);
+            if (err && err.type) throw err; // error ya clasificado, propagar
+            lastError = {
+              type: 'network',
+              message: err.name === 'AbortError' ? 'tiempo de espera agotado (10s)' : err.message,
+            };
+            if (attempt < CONFIG.MAX_RETRIES) {
+              await sleep(2000 * (attempt + 1) + Math.random() * 1000);
+            }
+          }
+        }
+        throw lastError;
+      }
+
+      // ==================== PARSING ====================
+      function parseMangaHtml(html, url) {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+
+        if (url.includes('/leer/')) {
+          const urlParts = url.split('/');
+          const parts = urlParts.filter(part => part);
+
+          const titleSlug = parts[parts.length - 2];
+          const currentChapter = parseFloat(parts[parts.length - 1]);
+          if (!titleSlug || isNaN(currentChapter)) throw new Error('Formato de URL de capítulo inválido');
+
+          const title = titleSlug
+            .split('-')
+            .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+            .join(' ');
+
+          const dropdown = doc.querySelector('.dropdown-manga');
+          if (!dropdown) throw new Error('No se encontró el selector de capítulos');
+
+          const options = Array.from(dropdown.querySelectorAll('option'));
+          const chapterNumbers = options.map(opt => {
+            const val = opt.textContent.trim().match(/(\d+(\.\d+)?)/);
+            return val ? parseFloat(val[0]) : null;
+          }).filter(n => n !== null);
+
+          const uniqueChapters = Array.from(new Set(chapterNumbers)).sort((a, b) => a - b);
+          return {
+            url,
+            title,
+            lastReadChapter: currentChapter,
+            latestChapter: uniqueChapters[uniqueChapters.length - 1] || 0,
+            chapterList: uniqueChapters
+          };
+        }
+
+        if (url.includes('/manga/')) {
+          const titleEl = doc.querySelector('h1.title-manga');
+          const title = titleEl ? titleEl.textContent.trim() : 'Título desconocido';
+
+          const chapterListDiv = doc.querySelector('.chapter-list');
+          if (!chapterListDiv) throw new Error('No se encontró el contenedor chapter-list');
+          const ul = chapterListDiv.querySelector('ul');
+          if (!ul) throw new Error('No se encontró la lista de capítulos (ul)');
+
+          const liItems = Array.from(ul.querySelectorAll('li'));
+          if (liItems.length === 0) throw new Error('No hay capítulos en la lista');
+
+          const chapterNumbers = liItems.map(li => {
+            const text = li.textContent.trim();
+            const match = text.match(/(\d+(\.\d+)?)/);
+            return match ? parseFloat(match[1]) : null;
+          }).filter(n => n !== null);
+
+          const uniqueChapters = Array.from(new Set(chapterNumbers)).sort((a, b) => a - b);
+          return {
+            url,
+            title,
+            lastReadChapter: 0,
+            latestChapter: uniqueChapters[uniqueChapters.length - 1] || 0,
+            chapterList: uniqueChapters
+          };
+        }
+
+        throw new Error('URL no reconocida para manga o capítulo');
+      }
+
+      // ==================== REFRESH INTELIGENTE ====================
+      function buildUpdated(manga, parsed, res, now) {
+        return {
+          ...manga,
+          title: parsed.title || manga.title,
+          // Nunca bajar el capítulo leído: si la URL agregada tiene un capítulo
+          // mayor que el guardado, se respeta el mayor.
+          lastReadChapter: Math.max(Number(manga.lastReadChapter) || 0, Number(parsed.lastReadChapter) || 0),
+          latestChapter: parsed.latestChapter ?? manga.latestChapter,
+          chapterList: parsed.chapterList || manga.chapterList,
+          lastFetchedAt: now,
+          fetchMeta: {
+            etag: res.etag || undefined,
+            lastModified: res.lastModified || undefined,
+          },
+        };
+      }
+
+      // Refresca un manga con petición condicional (ETag / If-Modified-Since).
+      // Si el servidor responde 304, reutiliza los datos guardados.
+      async function refreshMangaData(manga) {
+        const cached = manga.fetchMeta || {};
+        const headers = {};
+        if (cached.etag) headers['If-None-Match'] = cached.etag;
+        if (cached.lastModified) headers['If-Modified-Since'] = cached.lastModified;
+
+        const res = await fetchConResiliencia(manga.url, { headers });
+        const now = Date.now();
+
+        if (res.status === 304) {
+          if (Array.isArray(manga.chapterList) && manga.chapterList.length) {
+            // No modificado: solo actualizar el timestamp
+            return { ...manga, lastFetchedAt: now };
+          }
+          // 304 pero sin datos cacheados para reutilizar: fetch completo
+          const fresh = await fetchConResiliencia(manga.url, {});
+          return buildUpdated(manga, parseMangaHtml(fresh.html, manga.url), fresh, now);
+        }
+
+        return buildUpdated(manga, parseMangaHtml(res.html, manga.url), res, now);
+      }
+
+      // Para agregar mangas nuevos desde el formulario
+      async function fetchMangaInfo(url) {
+        const res = await fetchConResiliencia(url, {});
+        const parsed = parseMangaHtml(res.html, url);
+        return {
+          ...parsed,
+          lastFetchedAt: Date.now(),
+          fetchMeta: {
+            etag: res.etag || undefined,
+            lastModified: res.lastModified || undefined,
+          },
+        };
+      }
+
+      // ==================== DOM ====================
       const urlForm = document.getElementById('url-form');
       const urlInput = document.getElementById('manga-url');
       const refreshAllBtn = document.getElementById('refresh-all-btn');
@@ -202,23 +432,22 @@
       const errorAlert = document.getElementById('error-alert');
       const errorMessage = document.getElementById('error-message');
       const closeError = document.getElementById('close-error');
+      const successAlert = document.getElementById('success-alert');
+      const successMessage = document.getElementById('success-message');
+      const closeSuccess = document.getElementById('close-success');
 
-      // LocalStorage key for saving manga data
       const STORAGE_KEY = 'manga-tracker-data';
 
-      // Initialize the app
       init();
 
       function init() {
-        // Load stored manga from localStorage
         loadMangaList();
 
-        // Setup event listeners
         urlForm.addEventListener('submit', handleAddManga);
         refreshAllBtn.addEventListener('click', handleRefreshAll);
         closeError.addEventListener('click', hideError);
+        closeSuccess.addEventListener('click', hideSuccess);
         document.getElementById('filter-unread').addEventListener('change', loadMangaList);
-
 
         document.getElementById('export-btn').addEventListener('click', () => {
           const data = localStorage.getItem(STORAGE_KEY);
@@ -245,9 +474,9 @@
               if (!Array.isArray(json)) throw new Error('Formato inválido');
               localStorage.setItem(STORAGE_KEY, JSON.stringify(json));
               loadMangaList();
-              alert('Lista importada correctamente');
+              showSuccess('Lista importada correctamente');
             } catch (err) {
-              alert('Error al importar el archivo: ' + err.message);
+              showError('Error al importar el archivo: ' + err.message);
             }
           };
           reader.readAsText(file);
@@ -260,19 +489,15 @@
           localStorage.removeItem(STORAGE_KEY);
           loadMangaList();
         });
-
-
       }
 
       function loadMangaList() {
         const storedData = localStorage.getItem(STORAGE_KEY);
         let mangaData = storedData ? JSON.parse(storedData) : [];
 
-        // Verificar si el filtro está activo
         const filterUnread = document.getElementById('filter-unread');
         const onlyUnread = filterUnread && filterUnread.checked;
 
-        // Aplicar filtro si está activo
         if (onlyUnread) {
           mangaData = mangaData.filter(manga =>
             manga.latestChapter != null &&
@@ -281,8 +506,6 @@
           );
         }
 
-
-        // Orden alfabético por título
         mangaData.sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }));
 
         if (mangaData.length > 0) {
@@ -304,20 +527,21 @@
         entryEl.className = 'col mb-4 manga-entry';
         entryEl.dataset.id = manga.id;
 
-        // Calcular capítulos sin leer
         const unreadCount = Array.isArray(manga.chapterList)
           ? manga.chapterList.filter(ch => ch > manga.lastReadChapter).length
           : 0;
 
         const cardClass = unreadCount > 0 ? 'card h-100 alerta-nuevos' : 'card h-100';
 
-        // Build manga entry HTML
         entryEl.innerHTML = `
           <div class="${cardClass}">
             <div class="card-body">
               <h5 class="card-title">${manga.title}</h5>
               <p class="card-text">Último leído: Cap. ${manga.lastReadChapter}</p>
               <p class="card-text">Último disponible: Cap. ${manga.latestChapter}</p>
+              <p class="card-text text-muted small mb-2">
+                <i class="fas fa-clock me-1"></i> Actualizado ${timeAgo(manga.lastFetchedAt)}
+              </p>
               ${unreadCount > 0 ? `
                 <div class="alert alert-warning mt-2 mb-3 py-1 small">
                   <i class="fas fa-bell me-1"></i> ${unreadCount} capítulo(s) nuevo(s) disponible(s)!
@@ -328,7 +552,6 @@
                   <i class="fas fa-book-reader me-2"></i> Leer
                 </button>
 
-                <!-- Grupo siguiente + input + ir -->
                 <div class="d-flex gap-1 w-100 w-sm-auto align-items-center">
                   <button class="increment-btn btn btn-success">
                     <i class="fas fa-plus me-2"></i> Siguiente
@@ -348,52 +571,33 @@
           </div>
         `;
 
-
-
-
-        // Add event listeners
-        // Botón Leer
         const readBtn = entryEl.querySelector('.read-btn');
         readBtn.addEventListener('click', () => {
           const chapterUrl = getChapterUrl(manga.url, manga.lastReadChapter);
           window.open(chapterUrl, '_blank');
         });
 
-        // Botón Eliminar
         const deleteBtn = entryEl.querySelector('.delete-btn');
-        deleteBtn.addEventListener('click', () => 
-          deleteManga(manga.id)
-        );
+        deleteBtn.addEventListener('click', () => deleteManga(manga.id));
 
-        // Botón Siguiente (incrementa capítulo leído +1)
         const incrementBtn = entryEl.querySelector('.increment-btn');
         incrementBtn.addEventListener('click', () => {
-          incrementLastReadChapterAuto(manga.id);  // tu función que incrementa el capítulo leído
+          incrementLastReadChapterAuto(manga.id);
         });
 
-        // Botón Refrescar
         const refreshBtn = entryEl.querySelector('.refresh-btn');
         refreshBtn.addEventListener('click', async () => {
           refreshBtn.disabled = true;
           refreshBtn.innerHTML = `<i class="fas fa-spinner fa-spin me-2"></i> Updating...`;
 
           try {
-            const updated = await fetchMangaInfo(manga.url);
+            const updated = await refreshMangaData(manga);
             const stored = JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
-            const updatedData = stored.map(m =>
-              m.id === manga.id
-                ? {
-                    ...m,
-                    latestChapter: updated.latestChapter,
-                    chapterList: updated.chapterList
-                  }
-                : m
-            );
-
+            const updatedData = stored.map(m => (m.id === manga.id ? updated : m));
             localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedData));
             loadMangaList();
           } catch (err) {
-            showError(`Error actualizando ${manga.title}`);
+            showError(`Error actualizando ${manga.title}: ${friendlyError(err)}`);
             refreshBtn.innerHTML = `<i class="fas fa-exclamation-circle me-2"></i> Error`;
           } finally {
             setTimeout(() => {
@@ -403,11 +607,10 @@
           }
         });
 
-        // Botón "Ir" para ir a capítulo específico (nuevo)
         const goBtn = entryEl.querySelector('.go-btn');
         const chapterInput = entryEl.querySelector('.chapter-input');
 
-        goBtn.addEventListener('click', () => {
+        const tryGo = () => {
           const val = Number(chapterInput.value);
           if (val > 0) {
             openChapter(manga.url, val);
@@ -415,18 +618,11 @@
           } else {
             alert('Ingresa un número válido de capítulo');
           }
-        });
+        };
 
+        goBtn.addEventListener('click', tryGo);
         chapterInput.addEventListener('keypress', (e) => {
-          if (e.key === 'Enter') {
-            const val = Number(chapterInput.value);
-            if (val > 0) {
-              openChapter(manga.url, val);
-              chapterInput.value = '';
-            } else {
-              alert('Ingresa un número válido de capítulo');
-            }
-          }
+          if (e.key === 'Enter') tryGo();
         });
 
         mangaList.appendChild(entryEl);
@@ -435,10 +631,7 @@
           const chapterUrl = getChapterUrl(baseUrl, chapterNumber);
           window.open(chapterUrl, '_blank');
         }
-
-
       }
-
 
       async function handleAddManga(e) {
         e.preventDefault();
@@ -457,16 +650,12 @@
         const submitBtn = urlForm.querySelector('button[type="submit"]');
         const loader = submitBtn.querySelector('.spinner-border');
 
-        // Show loading state
         submitBtn.disabled = true;
         loader.classList.remove('d-none');
 
         try {
-          // In a real application, this would make an actual API call
-          // Here we're simulating the API call with a mock response
           const mangaData = await fetchMangaInfo(url);
 
-          // ✅ Verificar existencia por título, no por URL
           const storedData = localStorage.getItem(STORAGE_KEY);
           const existingData = storedData ? JSON.parse(storedData) : [];
 
@@ -477,19 +666,15 @@
             if (!confirmUpdate) return;
           }
 
-          // Save to localStorage
           saveManga(mangaData);
 
-          // Reset the form
           urlInput.value = '';
           hideError();
 
-          // Refresh the UI
           loadMangaList();
         } catch (error) {
-          showError(error.message || 'Failed to fetch manga information');
+          showError(friendlyError(error));
         } finally {
-          // Hide loading state
           submitBtn.disabled = false;
           loader.classList.add('d-none');
         }
@@ -499,95 +684,122 @@
         const progressContainer = document.getElementById('refreshProgressContainer');
         const bar = document.getElementById('refreshBar');
         const storedData = localStorage.getItem(STORAGE_KEY);
-        const mangaData = storedData ? JSON.parse(storedData) : [];
+        const allManga = storedData ? JSON.parse(storedData) : [];
 
-        if (mangaData.length === 0) {
+        if (allManga.length === 0) {
           showError('No hay mangas para actualizar');
+          return;
+        }
+
+        // Separar frescos de obsoletos: los frescos no generan peticiones
+        const now = Date.now();
+        const fresh = allManga.filter(m => m.lastFetchedAt && (now - m.lastFetchedAt) < CONFIG.FRESHNESS_MS);
+        const stale = allManga.filter(m => !m.lastFetchedAt || (now - m.lastFetchedAt) >= CONFIG.FRESHNESS_MS);
+
+        if (stale.length === 0) {
+          showSuccess(`Todo está al día: los ${fresh.length} mangas se actualizaron en las últimas 6 horas.`);
           return;
         }
 
         const loader = refreshAllBtn.querySelector('.spinner-border');
 
-        // Mostrar estado de carga
         progressContainer.classList.remove('d-none');
         refreshAllBtn.disabled = true;
         loader.classList.remove('d-none');
 
-        // Inicializar barra
         bar.classList.remove('bg-success');
         bar.classList.add('progress-bar-animated', 'progress-bar-striped');
         bar.style.width = '0%';
         bar.textContent = '0%';
 
+        const batchDeadline = now + CONFIG.BATCH_TIMEOUT_MS;
+        const updatedMap = new Map();
+        const failures = [];
+        let okCount = 0;
+        let consecutiveBlocked = 0;
+        let cancelledEarly = false;
+
         try {
-          const updatedMangaData = [];
-
-          for (let i = 0; i < mangaData.length; i++) {
-            const manga = mangaData[i];
-            try {
-              const updatedManga = await fetchMangaInfo(manga.url);
-              updatedMangaData.push({
-                ...manga,
-                latestChapter: updatedManga.latestChapter ?? manga.latestChapter, // usar el nuevo si viene, o el anterior
-                lastReadChapter: manga.lastReadChapter ?? 0 // mantener lectura anterior
-              });
-
-            } catch (error) {
-              updatedMangaData.push(manga);
+          for (let i = 0; i < stale.length; i++) {
+            // Límite total del lote
+            if (Date.now() > batchDeadline) {
+              stale.slice(i).forEach(m => failures.push(`${m.title} (tiempo agotado)`));
+              cancelledEarly = true;
+              break;
             }
 
-            // Actualizar barra de progreso
-            const percent = Math.round(((i + 1) / mangaData.length) * 100);
+            const manga = stale[i];
+            try {
+              const updated = await refreshMangaData(manga);
+              updatedMap.set(manga.id, updated);
+              okCount++;
+              consecutiveBlocked = 0;
+            } catch (err) {
+              failures.push(manga.title);
+              if (err && err.type === 'blocked') {
+                consecutiveBlocked++;
+                // Circuit breaker: el sitio nos está limitando, no seguir martillando
+                if (consecutiveBlocked >= CONFIG.CIRCUIT_BREAKER) {
+                  stale.slice(i + 1).forEach(m => failures.push(m.title));
+                  showError(`El sitio está limitando las peticiones (HTTP ${err.status}). Lote cancelado; probá de nuevo en 1 hora.`);
+                  cancelledEarly = true;
+                  break;
+                }
+              } else {
+                consecutiveBlocked = 0;
+              }
+            }
+
+            const percent = Math.round(((i + 1) / stale.length) * 100);
             bar.style.width = `${percent}%`;
             bar.textContent = `${percent}%`;
 
-            // ⏱️ Esperar entre 1 y 3 segundos antes de la siguiente petición
-            const delay = Math.random() * 2000 + 1000;
-            await new Promise(resolve => setTimeout(resolve, delay));
+            // Delay aleatorio entre peticiones (excepto tras el último)
+            if (i < stale.length - 1) await sleep(randomDelay());
           }
 
-          // Save all updated data
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedMangaData));
+          // Guardar solo si hubo cambios
+          if (updatedMap.size > 0) {
+            const merged = allManga.map(m => updatedMap.get(m.id) || m);
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+          }
 
-
-
-          // Finalizar barra
           bar.classList.remove('progress-bar-animated', 'progress-bar-striped');
           bar.classList.add('bg-success');
           bar.textContent = '¡Listo!';
 
-          // Refresh UI
           loadMangaList();
 
-        } catch (error) {
-          showError('Failed to refresh some manga');
+          // Resumen del lote
+          let summary = `✅ ${okCount} actualizados · ⏭ ${fresh.length} ya al día · ❌ ${failures.length} fallaron`;
+          if (failures.length > 0) {
+            const shown = failures.slice(0, 5).join(', ');
+            summary += ` (${shown}${failures.length > 5 ? '…' : ''})`;
+          }
+          if (cancelledEarly) {
+            showSuccess(summary + ' — el lote se canceló antes de completarse.');
+          } else {
+            showSuccess(summary);
+          }
         } finally {
-
-          // Ocultar la barra después de un tiempo (opcional)
           setTimeout(() => {
             progressContainer.classList.add('d-none');
-          }, 2000); // Oculta después de 2 segundos
+          }, 2000);
 
-          // Hide loading state
           refreshAllBtn.disabled = false;
           loader.classList.add('d-none');
-
-
         }
       }
 
       function getChapterUrl(baseUrl, chapterNumber) {
         const parts = baseUrl.split('/');
-        if (parts[parts.length - 1] === '') parts.pop(); // elimina barra vacía al final
-        parts[parts.length - 1] = chapterNumber.toString(); // reemplaza el número de capítulo
+        if (parts[parts.length - 1] === '') parts.pop();
+        parts[parts.length - 1] = chapterNumber.toString();
 
         let finalUrl = parts.join('/');
-
-        // ✅ Asegurar que termine con /
         if (!finalUrl.endsWith('/')) {
           finalUrl += '/';
         }
-
         return finalUrl;
       }
 
@@ -595,11 +807,9 @@
         const storedData = localStorage.getItem(STORAGE_KEY);
         const existingData = storedData ? JSON.parse(storedData) : [];
 
-        // Check if manga with this URL already exists
         const existingIndex = existingData.findIndex(item => item.title.toLowerCase() === mangaData.title.toLowerCase());
 
         if (existingIndex >= 0) {
-          // Update existing entry
           const existing = existingData[existingIndex];
 
           const updatedLastRead = mangaData.lastReadChapter > existing.lastReadChapter
@@ -609,17 +819,18 @@
           existingData[existingIndex] = {
             ...existing,
             lastReadChapter: updatedLastRead,
-            latestChapter: mangaData.latestChapter
+            latestChapter: mangaData.latestChapter,
+            chapterList: mangaData.chapterList || existing.chapterList,
+            fetchMeta: mangaData.fetchMeta || existing.fetchMeta,
+            lastFetchedAt: mangaData.lastFetchedAt || Date.now(),
           };
         } else {
-          // Add new entry
           existingData.push({
             id: Date.now().toString(),
             ...mangaData
           });
         }
 
-        // Save to localStorage
         localStorage.setItem(STORAGE_KEY, JSON.stringify(existingData));
       }
 
@@ -630,10 +841,7 @@
 
           const updatedData = existingData.filter(manga => manga.id !== id);
 
-          // Save updated data
           localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedData));
-
-          // Refresh UI
           loadMangaList();
         }
       }
@@ -647,12 +855,10 @@
 
         const current = Number(manga.lastReadChapter);
 
-        // Convertir todos los capítulos a float y ordenarlos
         const sortedChapters = [...new Set(manga.chapterList.map(c => parseFloat(c)))]
           .filter(c => !isNaN(c))
           .sort((a, b) => a - b);
 
-        // Buscar el siguiente capítulo estrictamente mayor
         const nextChapter = sortedChapters.find(chap => chap > current);
 
         if (nextChapter !== undefined) {
@@ -664,8 +870,6 @@
         }
       }
 
-
-
       function showError(message) {
         errorMessage.textContent = message;
         errorAlert.classList.remove('d-none');
@@ -675,95 +879,13 @@
         errorAlert.classList.add('d-none');
       }
 
-      // Mock API function for fetching manga information
-      async function fetchMangaInfo(url) {
-        // Simulate network request delay
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        const proxy = 'https://cors-anywhere.herokuapp.com/';
-        const response = await fetch(proxy + url);
-        const html = await response.text();
+      function showSuccess(message) {
+        successMessage.textContent = message;
+        successAlert.classList.remove('d-none');
+      }
 
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(html, 'text/html');
-
-        if (url.includes('/leer/')) {
-          try {
-            const urlParts = url.split('/');
-            // Remove empty parts
-            const parts = urlParts.filter(part => part);
-
-            // Extract info from URL parts
-            const id = parts[parts.length - 3]; // muktqzmmlv
-            const titleSlug = parts[parts.length - 2]; // el-mejor-sistema-de-jefes
-            const currentChapter = parseFloat(parts[parts.length - 1]); // 151
-
-            // Format title nicely (replace hyphens with spaces, capitalize words)
-            const title = titleSlug
-              .split('-')
-              .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-              .join(' ');
-
-            const dropdown = doc.querySelector('.dropdown-manga');
-            if (!dropdown) throw new Error('Could not find chapter dropdown');
-
-            const options = Array.from(dropdown.querySelectorAll('option'));
-            const chapterNumbers = options.map(opt => {
-              const val = opt.textContent.trim().match(/(\d+(\.\d+)?)/);
-              return val ? parseFloat(val[0]) : null;
-            }).filter(n => n !== null);
-
-            const uniqueChapters = Array.from(new Set(chapterNumbers)).sort((a, b) => a - b);
-            const latestChapter = uniqueChapters[uniqueChapters.length - 1] || 0;
-            
-            return {
-              url,
-              title,
-              lastReadChapter: currentChapter,
-              latestChapter,
-              chapterList: uniqueChapters
-            };
-          } catch (error) {
-            throw new Error('Invalid manga URL format');
-          }
-        } else if (url.includes('/manga/')) {
-          // Lógica para URLs tipo manga principal
-          try {
-            // Ejemplo: buscar título desde el h1 o título principal
-            const titleEl = doc.querySelector('h1.title-manga'); // o algún selector más específico si hace falta
-            const title = titleEl ? titleEl.textContent.trim() : 'Título desconocido';
-
-            // Buscar la lista de capítulos dentro de .chapter-list > ul > li
-            const chapterListDiv = doc.querySelector('.chapter-list');
-            if (!chapterListDiv) throw new Error('No se encontró el contenedor chapter-list');
-
-            const ul = chapterListDiv.querySelector('ul');
-            if (!ul) throw new Error('No se encontró la lista de capítulos (ul)');
-
-            const liItems = Array.from(ul.querySelectorAll('li'));
-            if (liItems.length === 0) throw new Error('No hay capítulos en la lista');
-
-            const chapterNumbers = liItems.map(li => {
-              const text = li.textContent.trim();
-              const match = text.match(/(\d+(\.\d+)?)/);
-              return match ? parseFloat(match[1]) : null;
-            }).filter(n => n !== null);
-
-            const uniqueChapters = Array.from(new Set(chapterNumbers)).sort((a, b) => a - b);
-            const latestChapter = uniqueChapters[uniqueChapters.length - 1] || 0;
-
-            return {
-              url,
-              title,
-              lastReadChapter: 0, // No hay capítulo leído aún
-              latestChapter,
-              chapterList: uniqueChapters
-            };
-          } catch (error) {
-            throw new Error('Formato de URL de manga inválido');
-          }
-        } else {
-          throw new Error('URL no reconocida para manga o capítulo');
-        }
+      function hideSuccess() {
+        successAlert.classList.add('d-none');
       }
     });
   </script>
